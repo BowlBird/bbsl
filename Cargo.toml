@@ -1,8 +1,13 @@
 [package]
 name = "bbsl"
-version = "0.1.0"
+description = "BowlBird's Screen Locker"
+version = "1.0.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+clap = { version = "4.5.1", features = ["derive"] }
+wayland-client = { version = "0.31.2", features = ["log"] }
+wayland-protocols = { version = "0.31.2", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.2.0", features = ["client"] }
