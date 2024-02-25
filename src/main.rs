@@ -1,16 +1,18 @@
 // https://wayland-book.com/
 use std::{os::{fd::BorrowedFd, raw::c_void}, ptr, str::FromStr};
 
-use nix::libc::{close, ftruncate, mmap, shm_open, MAP_FAILED, MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE};
+use nix::libc::{close, ftruncate, mmap, munmap, shm_open, MAP_FAILED, MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE};
 use rand::{distributions::Alphanumeric, Rng};
-use wayland_client::{protocol::{wl_buffer::{self, WlBuffer}, wl_compositor::{self, WlCompositor}, wl_registry::{self, WlRegistry}, wl_shm::{self, WlShm}, wl_shm_pool::{self, WlShmPool}, wl_surface::{self, WlSurface}}, Connection, Dispatch, EventQueue, QueueHandle};
+use wayland_client::{protocol::{wl_buffer::{self, WlBuffer}, wl_callback::{self, WlCallback}, wl_compositor::{self, WlCompositor}, wl_registry::{self, WlRegistry}, wl_shm::{self, WlShm}, wl_shm_pool::{self, WlShmPool}, wl_surface::{self, WlSurface}}, Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::xdg::shell::client::{xdg_surface::{self, XdgSurface}, xdg_toplevel::{self, XdgToplevel}, xdg_wm_base::{self, XdgWmBase}};
 
 struct AppState {
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     base: Option<XdgWmBase>,
-    wl_surface: Option<WlSurface>
+    wl_surface: Option<WlSurface>,
+    xdg_surface: Option<XdgSurface>,
+    xdg_toplevel: Option<XdgToplevel>
 }
 
 impl Dispatch<WlCompositor, ()> for AppState {
@@ -118,7 +120,33 @@ impl Dispatch<XdgToplevel, ()> for AppState {
         _conn: &Connection,
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
-        if let xdg_toplevel::Event::Configure { width, height, states } = _event {
+        if let xdg_toplevel::Event::Configure { width, height, states } = _event {}
+    }
+}
+
+impl Dispatch<WlCallback, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlCallback,
+        _event: wl_callback::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        /* callback_data is the current frame time, this can be used for animations. */
+        if let wl_callback::Event::Done { callback_data } = _event {
+            
+            let wl_surface = _state
+                .wl_surface.as_ref()
+                .expect("cannot connect to wl_surface");
+            let _ = wl_surface.frame(_qhandle, ());
+
+            let buffer = draw_frame(_state, _qhandle)
+                .expect("could not draw frame");
+
+            wl_surface.attach(Some(&buffer), 0, 0);
+            wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+            wl_surface.commit();
         }
     }
 }
@@ -133,6 +161,7 @@ impl Dispatch<WlRegistry, ()> for AppState {
             _qhandle: &wayland_client::QueueHandle<Self>,
         ) {
         if let wl_registry::Event::Global { name, interface, version } = _event {
+            println!("{}", interface);
             if interface == "wl_compositor" {
                 _state.compositor = Some(_proxy.bind::<WlCompositor, (), AppState>(name, version, _qhandle, ()))
             }
@@ -199,7 +228,10 @@ fn draw_frame(state: &AppState, qh: &QueueHandle<AppState>) -> Result<WlBuffer, 
         ()
     );
     pool.destroy();
-    unsafe {close(fd)};
+    unsafe {
+        close(fd);
+        munmap(_pool_data, shm_pool_size);
+    };
 
     return Ok(buffer);
 }
@@ -212,6 +244,8 @@ fn main() {
         shm: None,
         base: None,
         wl_surface: None,
+        xdg_surface: None,
+        xdg_toplevel: None,
     };
 
     let connection = Connection::connect_to_env()
@@ -232,16 +266,27 @@ fn main() {
     let wl_surface = state
         .wl_surface.as_ref()
         .expect("could not connect to wl_surface");
-
-    let xdg_surface = state
+    
+    state.xdg_surface = Some(state
         .base.as_ref()
         .expect("could not connect to xdg_wm_base")
-        .get_xdg_surface(wl_surface, &qh, ());
+        .get_xdg_surface(wl_surface, &qh, ()));
 
-    let _xdg_toplevel = xdg_surface.get_toplevel(&qh, ());
+    let xdg_surface = state
+        .xdg_surface.as_ref()
+        .expect("could not connect to xdg_surface");
+
+    state.xdg_toplevel = Some(xdg_surface.get_toplevel(&qh, ()));
+
+    let _xdg_toplevel = state
+        .xdg_toplevel.as_ref()
+        .expect("could not connect to xdg_toplevel");
+
     _xdg_toplevel.set_title(String::from_str("bbsl").expect("could not create string"));
     
     wl_surface.commit();
+
+    let _ = wl_surface.frame(&qh, ());
 
     loop {
         let _ = event_queue.blocking_dispatch(&mut state);
