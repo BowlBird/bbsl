@@ -6,13 +6,20 @@ use rand::{distributions::Alphanumeric, Rng};
 use wayland_client::{protocol::{wl_buffer::{self, WlBuffer}, wl_callback::{self, WlCallback}, wl_compositor::{self, WlCompositor}, wl_registry::{self, WlRegistry}, wl_shm::{self, WlShm}, wl_shm_pool::{self, WlShmPool}, wl_surface::{self, WlSurface}}, Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::xdg::shell::client::{xdg_surface::{self, XdgSurface}, xdg_toplevel::{self, XdgToplevel}, xdg_wm_base::{self, XdgWmBase}};
 
+struct Rect {
+    width: i32,
+    height: i32
+}
+
 struct AppState {
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     base: Option<XdgWmBase>,
     wl_surface: Option<WlSurface>,
     xdg_surface: Option<XdgSurface>,
-    xdg_toplevel: Option<XdgToplevel>
+    xdg_toplevel: Option<XdgToplevel>,
+    dimension: Option<Rect>,
+    quit: bool
 }
 
 impl Dispatch<WlCompositor, ()> for AppState {
@@ -120,7 +127,12 @@ impl Dispatch<XdgToplevel, ()> for AppState {
         _conn: &Connection,
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
-        if let xdg_toplevel::Event::Configure { width, height, states } = _event {}
+        if let xdg_toplevel::Event::Configure { width, height, states: _ } = _event {
+            _state.dimension = Some(Rect {width, height})
+        }
+        else if let xdg_toplevel::Event::Close = _event {
+            _state.quit = true;
+        }
     }
 }
 
@@ -161,7 +173,7 @@ impl Dispatch<WlRegistry, ()> for AppState {
             _qhandle: &wayland_client::QueueHandle<Self>,
         ) {
         if let wl_registry::Event::Global { name, interface, version } = _event {
-            println!("{}", interface);
+            // println!("{}", interface);
             if interface == "wl_compositor" {
                 _state.compositor = Some(_proxy.bind::<WlCompositor, (), AppState>(name, version, _qhandle, ()))
             }
@@ -177,8 +189,19 @@ impl Dispatch<WlRegistry, ()> for AppState {
 
 fn draw_frame(state: &AppState, qh: &QueueHandle<AppState>) -> Result<WlBuffer, ()> {
 
-    let width = 640;
-    let height = 480;
+    let dimension = state
+        .dimension.as_ref()
+        .expect("could not connect to dimension");
+    
+    let width = if dimension.width != 0 {
+        dimension.width
+    }
+    else { 1 };
+    let height = if dimension.height != 0 {
+        dimension.height
+    }
+    else { 1 };
+
     let stride = width * 4;
     let shm_pool_size = height * stride;
 
@@ -230,7 +253,7 @@ fn draw_frame(state: &AppState, qh: &QueueHandle<AppState>) -> Result<WlBuffer, 
     pool.destroy();
     unsafe {
         close(fd);
-        munmap(_pool_data, shm_pool_size);
+        munmap(_pool_data, shm_pool_size as usize);
     };
 
     return Ok(buffer);
@@ -246,6 +269,8 @@ fn main() {
         wl_surface: None,
         xdg_surface: None,
         xdg_toplevel: None,
+        dimension: None,
+        quit: false,
     };
 
     let connection = Connection::connect_to_env()
@@ -284,11 +309,12 @@ fn main() {
 
     _xdg_toplevel.set_title(String::from_str("bbsl").expect("could not create string"));
     
-    wl_surface.commit();
-
+    wl_surface.commit();    
     let _ = wl_surface.frame(&qh, ());
 
-    loop {
+    _xdg_toplevel.set_fullscreen(None);
+
+    while !state.quit {
         let _ = event_queue.blocking_dispatch(&mut state);
     }
 }
