@@ -4,8 +4,10 @@ mod events;
 mod drawing;
 
 use std::str::FromStr;
-use wayland_client::{protocol::{wl_compositor::WlCompositor, wl_shm::WlShm, wl_surface::WlSurface}, Connection, EventQueue};
+use wayland_client::{protocol::{wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat, wl_shm::WlShm, wl_surface::WlSurface}, Connection, EventQueue};
 use wayland_protocols::xdg::shell::client::{xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase};
+use pam::Client;
+use xkbcommon::xkb::{ffi::XKB_CONTEXT_NO_FLAGS, Context};
 
 struct Rect {
     width: i32,
@@ -19,6 +21,9 @@ struct AppState {
     wl_surface: Option<WlSurface>,
     xdg_surface: Option<XdgSurface>,
     xdg_toplevel: Option<XdgToplevel>,
+    wl_seat: Option<WlSeat>,
+    wl_keyboard: Option<WlKeyboard>,
+    xkb_context: Option<Context>,
     dimension: Option<Rect>,
     quit: bool
 }
@@ -33,12 +38,16 @@ fn main() {
         wl_surface: None,
         xdg_surface: None,
         xdg_toplevel: None,
+        wl_seat: None,
+        wl_keyboard: None,
+        xkb_context: None, 
         dimension: None,
         quit: false,
     };
 
     let connection = Connection::connect_to_env()
         .expect("could not connect to env");
+    state.xkb_context = Some(Context::new(XKB_CONTEXT_NO_FLAGS));
 
     let display = connection.display();
 
@@ -46,6 +55,11 @@ fn main() {
     let qh = event_queue.handle();
     display.get_registry(&qh, ());
     let _ = event_queue.roundtrip(&mut state);
+
+    state.wl_keyboard = Some(state
+        .wl_seat.as_ref()
+        .expect("could not connect to wl_seat")
+        .get_keyboard(&qh, ()));
 
     state.wl_surface = Some(state
         .compositor.as_ref()
@@ -78,7 +92,19 @@ fn main() {
 
     _xdg_toplevel.set_fullscreen(None);
 
+    let mut client = Client::with_password("system-auth")
+    .expect("Failed to init PAM client");
+
+    // Preset the login & password we will use for authentication
+    client.conversation_mut().set_credentials("carson", "8dyUfd9W9JbeRKXqaz");
+    // Actually try to authenticate:
+    client.authenticate().expect("Authentication failed!");
+    // Now that we are authenticated, it's possible to open a sesssion:
+    client.open_session().expect("Failed to open a session!");
+
+
     while !state.quit {
+
         let _ = event_queue.blocking_dispatch(&mut state);
     }
 }
