@@ -1,6 +1,6 @@
 use std::{ffi::c_void, os::fd::BorrowedFd, ptr};
 
-use nix::libc::{close, ftruncate, mmap, munmap, shm_open, MAP_FAILED, MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE};
+use nix::libc::{close, ftruncate, mmap, munmap, shm_open, shm_unlink, MAP_FAILED, MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE};
 use rand::{distributions::Alphanumeric, Rng};
 use wayland_client::{protocol::{wl_buffer::WlBuffer, wl_shm}, QueueHandle};
 
@@ -31,10 +31,11 @@ pub fn draw_frame(state: &AppState, qh: &QueueHandle<AppState>) -> Result<WlBuff
             .map(char::from)
             .collect();
         let name = format!("/buffer-{}\0", random);
-        shm_open(name.as_ptr() as *const i8, O_RDWR | O_CREAT | O_EXCL, 0600)
-        // syscall(SYS_memfd_create, "buffer", 0) as RawFd
+        let fd = shm_open(name.as_ptr() as *const i8, O_RDWR | O_CREAT | O_EXCL, 0600);
+        shm_unlink(name.as_ptr() as *const i8);
+        fd
     };
-    
+
     if fd == -1 {
         return Err(())
     }
@@ -47,11 +48,11 @@ pub fn draw_frame(state: &AppState, qh: &QueueHandle<AppState>) -> Result<WlBuff
     }
 
 
-    let _pool_data = unsafe {
+    let pool_data = unsafe {
         mmap(ptr::null_mut() as *mut c_void, shm_pool_size as usize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
     };
 
-    if _pool_data == MAP_FAILED {
+    if pool_data == MAP_FAILED {
         return Err(());
     }
 
@@ -69,10 +70,22 @@ pub fn draw_frame(state: &AppState, qh: &QueueHandle<AppState>) -> Result<WlBuff
         qh, 
         ()
     );
+
+    let color:u32 = rand::thread_rng().gen_range(0x00000000..=0x50);
+
+    for y in 0..height {
+        for x in 0..width {
+            unsafe {
+                *(pool_data.offset(((y * width + x) * 4) as isize) as *mut u32) = color;
+            }
+        }
+    }
+
+
     pool.destroy();
     unsafe {
         close(fd);
-        munmap(_pool_data, shm_pool_size as usize);
+        munmap(pool_data, shm_pool_size as usize);
     };
 
     return Ok(buffer);

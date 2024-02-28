@@ -61,7 +61,8 @@ impl Dispatch<WlBuffer, ()> for AppState {
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
         if let wl_buffer::Event::Release = _event {
-            _proxy.destroy()
+            _proxy.destroy();
+            
         }
     }
 }
