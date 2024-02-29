@@ -3,11 +3,12 @@
 mod events;
 mod drawing;
 
-use std::str::FromStr;
-use wayland_client::{protocol::{wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat, wl_shm::WlShm, wl_surface::WlSurface}, Connection, EventQueue};
+use std::{collections::VecDeque, str::FromStr};
+use drawing::FrameBuffer;
+use wayland_client::{protocol::{wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat, wl_shm::WlShm, wl_surface::WlSurface}, Connection, EventQueue};
 use wayland_protocols::xdg::shell::client::{xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase};
 use pam::Client;
-use xkbcommon::xkb::{ffi::XKB_CONTEXT_NO_FLAGS, Context};
+use xkbcommon::xkb::{ffi::XKB_CONTEXT_NO_FLAGS, Context, Keymap, State};
 
 struct Rect {
     width: i32,
@@ -24,7 +25,10 @@ struct AppState {
     wl_seat: Option<WlSeat>,
     wl_keyboard: Option<WlKeyboard>,
     xkb_context: Option<Context>,
+    xkb_keymap: Option<Keymap>,
+    xkb_state: Option<State>,
     dimension: Option<Rect>,
+    frame_buffers: VecDeque<FrameBuffer>,
     quit: bool
 }
 
@@ -41,7 +45,10 @@ fn main() {
         wl_seat: None,
         wl_keyboard: None,
         xkb_context: None, 
+        xkb_keymap: None,
+        xkb_state: None,
         dimension: None,
+        frame_buffers: VecDeque::new(),
         quit: false,
     };
 

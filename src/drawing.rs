@@ -2,27 +2,47 @@ use std::{ffi::c_void, os::fd::BorrowedFd, ptr};
 
 use nix::libc::{close, ftruncate, mmap, munmap, shm_open, shm_unlink, MAP_FAILED, MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE};
 use rand::{distributions::Alphanumeric, Rng};
-use wayland_client::{protocol::{wl_buffer::WlBuffer, wl_shm}, QueueHandle};
+use wayland_client::{protocol::{wl_buffer::WlBuffer, wl_shm::{self, WlShm}, wl_surface::WlSurface}, QueueHandle};
 
-use crate::AppState;
+use crate::{AppState, Rect};
 
-pub fn draw_frame(state: &AppState, qh: &QueueHandle<AppState>) -> Result<WlBuffer, ()> {
+/**
+ *  pool_data is a writable u32 array 
+ *
+ * Example:
+ * *(pool_data.offset(((y * width + x) * 4) as isize) as *mut u32) = color
+ */
+pub struct FrameBuffer {
+    wl_buffer: WlBuffer,
+    pool_data: *mut c_void,
+    dimension: Rect,
+}
 
-    let dimension = state
-        .dimension.as_ref()
-        .expect("could not connect to dimension");
-    
-    let width = if dimension.width != 0 {
-        dimension.width
+pub trait Release {
+    fn release(&self);
+}
+
+impl Release for &FrameBuffer {
+    fn release(&self) {
+        self.wl_buffer.destroy();
+        
+        unsafe {
+            munmap(
+                self.pool_data, 
+                (self.dimension.height * self.dimension.width * 4) as usize
+            );
+        }
     }
-    else { 1 };
-    let height = if dimension.height != 0 {
-        dimension.height
-    }
-    else { 1 };
+}
 
-    let stride = width * 4;
-    let shm_pool_size = height * stride;
+pub fn generate_frame_buffer(dimension: &Rect, wl_shm: &WlShm, qh: &QueueHandle<AppState>) -> Result<FrameBuffer, ()> {
+
+    if dimension.width == 0 || dimension.height == 0 {
+        return Err(());
+    }
+
+    let stride = dimension.width * 4;
+    let shm_pool_size = dimension.height * stride;
 
     let fd = unsafe {
         let random: String = rand::thread_rng()
@@ -47,7 +67,6 @@ pub fn draw_frame(state: &AppState, qh: &QueueHandle<AppState>) -> Result<WlBuff
         }
     }
 
-
     let pool_data = unsafe {
         mmap(ptr::null_mut() as *mut c_void, shm_pool_size as usize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
     };
@@ -56,37 +75,55 @@ pub fn draw_frame(state: &AppState, qh: &QueueHandle<AppState>) -> Result<WlBuff
         return Err(());
     }
 
-    let pool = state.shm.as_ref().unwrap().create_pool(unsafe {BorrowedFd::borrow_raw(fd) }, shm_pool_size as i32, &qh, ());
+    let pool = wl_shm
+        .create_pool(
+            unsafe {BorrowedFd::borrow_raw(fd) }, 
+            shm_pool_size as i32, 
+            qh, 
+            ()
+        );
 
     let index = 0;
-    let offset = height * stride * index;
+    let offset = dimension.height * stride * index;
 
     let buffer = pool.create_buffer(
         offset as i32, 
-        width as i32, 
-        height as i32, 
+        dimension.width as i32, 
+        dimension.height as i32, 
         stride as i32, 
         wl_shm::Format::Xrgb8888, 
         qh, 
         ()
     );
 
+    pool.destroy();
+    unsafe {close(fd)};
+
+    return Ok(FrameBuffer {wl_buffer: buffer, pool_data: pool_data, dimension: Rect {width: dimension.width, height: dimension.height}});
+}
+
+
+pub fn attach_to_surface(frame_buffer: Option<&FrameBuffer>, wl_surface: &WlSurface) {
+    let buffer = match frame_buffer {
+        Some(frame_buffer) => {
+            Some(&frame_buffer.wl_buffer)
+        }
+        None => None
+    };
+
+    wl_surface.attach(buffer, 0, 0);
+    wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+    wl_surface.commit();
+}
+
+pub fn draw_to_buffer(frame_buffer: &FrameBuffer) {
     let color:u32 = rand::thread_rng().gen_range(0x00000000..=0x50);
 
-    for y in 0..height {
-        for x in 0..width {
+    for y in 0..frame_buffer.dimension.height {
+        for x in 0..frame_buffer.dimension.width {
             unsafe {
-                *(pool_data.offset(((y * width + x) * 4) as isize) as *mut u32) = color;
+                *(frame_buffer.pool_data.offset(((y * frame_buffer.dimension.width + x) * 4) as isize) as *mut u32) = color;
             }
         }
     }
-
-
-    pool.destroy();
-    unsafe {
-        close(fd);
-        munmap(pool_data, shm_pool_size as usize);
-    };
-
-    return Ok(buffer);
 }

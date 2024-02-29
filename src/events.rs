@@ -1,11 +1,11 @@
-use std::{ffi::CStr, os::fd::AsRawFd, ptr};
+use std::{collections::VecDeque, ffi::CStr, os::fd::AsRawFd, ptr};
 
 use nix::libc::{close, mmap, munmap, MAP_PRIVATE, PROT_READ};
-use wayland_client::{protocol::{wl_buffer::{self, WlBuffer}, wl_callback::{self, WlCallback}, wl_compositor::{self, WlCompositor}, wl_keyboard::{self, WlKeyboard}, wl_registry::{self, WlRegistry}, wl_seat::{self, WlSeat}, wl_shm::{self, WlShm}, wl_shm_pool::{self, WlShmPool}, wl_surface::{self, WlSurface}}, Connection, Dispatch};
+use wayland_client::{protocol::{wl_buffer::{self, WlBuffer}, wl_callback::{self, WlCallback}, wl_compositor::{self, WlCompositor}, wl_keyboard::{self, WlKeyboard}, wl_registry::{self, WlRegistry}, wl_seat::{self, WlSeat}, wl_shm::{self, WlShm}, wl_shm_pool::{self, WlShmPool}, wl_surface::{self, WlSurface}}, Connection, Dispatch, QueueHandle};
 use wayland_protocols::xdg::shell::client::{xdg_surface::{self, XdgSurface}, xdg_toplevel::{self, XdgToplevel}, xdg_wm_base::{self, XdgWmBase}};
 use xkbcommon::xkb::{ffi::{XKB_KEYMAP_COMPILE_NO_FLAGS, XKB_KEYMAP_FORMAT_TEXT_V1}, Keycode, Keymap, State};
 
-use crate::{drawing::draw_frame, AppState, Rect};
+use crate::{drawing::{attach_to_surface, draw_to_buffer, generate_frame_buffer, FrameBuffer, Release}, AppState, Rect};
 
 impl Dispatch<WlCompositor, ()> for AppState {
     fn event(
@@ -61,8 +61,7 @@ impl Dispatch<WlBuffer, ()> for AppState {
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
         if let wl_buffer::Event::Release = _event {
-            _proxy.destroy();
-            
+            // _proxy.destroy();
         }
     }
 }
@@ -94,12 +93,22 @@ impl Dispatch<XdgSurface, ()> for AppState {
         if let xdg_surface::Event::Configure { serial } = _event {
             _proxy.ack_configure(serial);
 
-            let buffer = draw_frame(&_state, _qhandle)
-                .expect("unable to generate buffer");
-
             let wl_surface = _state.wl_surface.as_ref().expect("unable to connect to surface");
-            wl_surface.attach(Some(&buffer), 0, 0);
-            wl_surface.commit();
+
+            render_from_frame_queue(
+                &mut _state.frame_buffers,
+                wl_surface,
+                &_state.dimension,
+                _state.shm.as_ref().expect("could not connect to shm"),
+                _qhandle
+            )
+
+            // let buffer = draw_frame(&_state, _qhandle)
+            //     .expect("unable to generate buffer");
+
+            // wl_surface.attach(Some(&buffer), 0, 0);
+            // wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+            // wl_surface.commit();
         }
     }
 }
@@ -114,7 +123,13 @@ impl Dispatch<XdgToplevel, ()> for AppState {
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
         if let xdg_toplevel::Event::Configure { width, height, states: _ } = _event {
-            _state.dimension = Some(Rect {width, height})
+            let width = if width == 0 {1} else {width};
+            let height = if height == 0 {1} else {height};
+            _state.dimension = Some(Rect {width, height});
+            _state.frame_buffers.iter().for_each(|buffer| {
+                buffer.release();
+            });
+            _state.frame_buffers.clear();
         }
         else if let xdg_toplevel::Event::Close = _event {
             _state.quit = true;
@@ -139,12 +154,13 @@ impl Dispatch<WlCallback, ()> for AppState {
                 .expect("cannot connect to wl_surface");
             let _ = wl_surface.frame(_qhandle, ());
 
-            let buffer = draw_frame(_state, _qhandle)
-                .expect("could not draw frame");
-
-            wl_surface.attach(Some(&buffer), 0, 0);
-            wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-            wl_surface.commit();
+            render_from_frame_queue(
+                &mut _state.frame_buffers,
+                wl_surface,
+                &_state.dimension,
+                _state.shm.as_ref().expect("could not connect to shm"),
+                _qhandle
+            )
         }   
     }
 }
@@ -169,8 +185,6 @@ impl Dispatch<WlKeyboard, ()> for AppState {
         _conn: &Connection,
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
-        let mut xkb_keymap = None;
-        let mut xkb_state = None;
         if let wl_keyboard::Event::Keymap { format, fd, size } = _event {
             let map_shm = unsafe {
                 mmap(ptr::null_mut(), size as usize, PROT_READ, MAP_PRIVATE, fd.as_raw_fd(), 0)
@@ -179,30 +193,33 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 CStr::from_ptr(map_shm as *const _)
                     .to_string_lossy().into_owned()
             };
-            xkb_keymap = Keymap::new_from_string(
+            _state.xkb_keymap = Keymap::new_from_string(
                 &_state.xkb_context.as_ref()
                     .expect("could not connect to xkb_context"),
-                    map_shm_string, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
-            xkb_state = Some(State::new(&xkb_keymap.unwrap()));
-
+                    map_shm_string, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS
+            );
+            _state.xkb_state = Some(State::new(&_state.xkb_keymap.as_ref().unwrap()));
             unsafe {munmap(map_shm, size as usize);};
             unsafe {close(fd.as_raw_fd());};
         }
 
         else if let wl_keyboard::Event::Key { serial, time, key, state } = _event {
-            match xkb_state {
-                Some(xkb_state) => {
-                    let sym = xkb_state.key_get_one_sym(Keycode::new(key));
-                    println!("{:?}", sym);
-                }
-                None => {}
-            }
+            let sym = _state.xkb_state.as_ref()
+                    .expect("could not connect to xkb_state")
+                    .key_get_one_sym(Keycode::new((key + 8) as u32));
+            println!("{} {}", 
+                sym.name().unwrap(), 
+                _state.xkb_state.as_ref()
+                    .expect("could not connect to xkb_state")
+                    .key_get_utf8(Keycode::new((key + 8) as u32))
+            );
+
+            println!("{:?}", state);
             
         }
-
         else if let wl_keyboard::Event::Modifiers { serial, mods_depressed, mods_latched, mods_locked, group } = _event {
-            match xkb_state {
-                Some(mut xkb_state) => {xkb_state.update_mask(
+            match &_state.xkb_state {
+                Some(_) => {_state.xkb_state.as_mut().unwrap().update_mask(
                     mods_depressed,
                     mods_latched,
                     mods_locked,
@@ -213,6 +230,23 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                 None => {}
             }
             
+        }
+        else if let wl_keyboard::Event::RepeatInfo { rate, delay } = _event {
+            /* TODO */
+        }
+        /* enumerate keys that were already pressed while entering */
+        else if let wl_keyboard::Event::Enter { serial, surface, keys } = _event {
+            keys.iter().for_each(|key| {
+                let sym = _state.xkb_state.as_ref()
+                    .expect("could not connect to xkb_state")
+                    .key_get_one_sym(Keycode::new((key + 8) as u32));
+                println!("{} {}", 
+                    sym.name().unwrap(), 
+                    _state.xkb_state.as_ref()
+                        .expect("could not connect to xkb_state")
+                        .key_get_utf8(Keycode::new((key + 8) as u32))
+                );
+            })
         }
     }
 }
@@ -241,5 +275,32 @@ impl Dispatch<WlRegistry, ()> for AppState {
                 _state.wl_seat = Some(_proxy.bind::<WlSeat, (), AppState>(name, version, _qhandle, ()));
             }
         }
+    }
+}
+
+fn render_from_frame_queue(
+    frame_buffers: &mut VecDeque<FrameBuffer>, 
+    wl_surface: &WlSurface, 
+    dimension: &Option<Rect>,
+    wl_shm: &WlShm,
+    qh: &QueueHandle<AppState>
+) {
+    if frame_buffers.len() == 2 {
+        draw_to_buffer(&frame_buffers[0]);
+        attach_to_surface(Some(&frame_buffers[0]), wl_surface);
+        frame_buffers.swap(0, 1);
+    }
+    else {
+        match &dimension {
+            Some(dimension) => {
+                let frame_buffer = generate_frame_buffer(&dimension, wl_shm, qh)
+                    .expect("could not generate frame_buffer!");
+                draw_to_buffer(&frame_buffer);
+                attach_to_surface(Some(&frame_buffer), wl_surface);
+                frame_buffers.push_back(frame_buffer);
+            }
+            None => attach_to_surface(None, wl_surface)
+        }
+        
     }
 }
