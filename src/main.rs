@@ -30,12 +30,6 @@ fn main() {
     let mut client = Client::with_password("system-auth")
     .expect("Failed to init PAM client");
 
-    // Preset the login & password we will use for authentication
-    client.conversation_mut().set_credentials("carson", "8dyUfd9W9JbeRKXqaz");
-    // Actually try to authenticate:
-    client.authenticate().expect("Authentication failed!");
-    // Now that we are authenticated, it's possible to open a sesssion:
-    client.open_session().expect("Failed to open a session!");
 
     WaylandClientBuilder::default()
         .drawing_callback(draw)
@@ -43,4 +37,11 @@ fn main() {
         .build()
         .expect("unable to build client")
         .start();
+
+    // Preset the login & password we will use for authentication
+    client.conversation_mut().set_credentials("", "");
+    // Actually try to authenticate:
+    client.authenticate().expect("Authentication failed!");
+    // Now that we are authenticated, it's possible to open a sesssion:
+    client.open_session().expect("Failed to open a session!");
 }
