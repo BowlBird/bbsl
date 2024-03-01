@@ -4,7 +4,7 @@ use nix::libc::{close, ftruncate, mmap, munmap, shm_open, shm_unlink, MAP_FAILED
 use rand::{distributions::Alphanumeric, Rng};
 use wayland_client::{protocol::{wl_buffer::WlBuffer, wl_shm::{self, WlShm}, wl_surface::WlSurface}, QueueHandle};
 
-use crate::{AppState, Rect};
+use super::{AppState, Rect};
 
 /**
  *  pool_data is a writable u32 array 
@@ -14,8 +14,8 @@ use crate::{AppState, Rect};
  */
 pub struct FrameBuffer {
     wl_buffer: WlBuffer,
-    pool_data: *mut c_void,
-    dimension: Rect,
+    pub pool_data: *mut c_void,
+    pub dimension: Rect,
 }
 
 pub trait Release {
@@ -114,16 +114,4 @@ pub fn attach_to_surface(frame_buffer: Option<&FrameBuffer>, wl_surface: &WlSurf
     wl_surface.attach(buffer, 0, 0);
     wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
     wl_surface.commit();
-}
-
-pub fn draw_to_buffer(frame_buffer: &FrameBuffer) {
-    let color:u32 = rand::thread_rng().gen_range(0x00000000..=0x50);
-
-    for y in 0..frame_buffer.dimension.height {
-        for x in 0..frame_buffer.dimension.width {
-            unsafe {
-                *(frame_buffer.pool_data.offset(((y * frame_buffer.dimension.width + x) * 4) as isize) as *mut u32) = color;
-            }
-        }
-    }
 }
