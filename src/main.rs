@@ -1,8 +1,6 @@
 // https://wayland-book.com/
 
-use std::ffi::c_void;
-
-use client::{WaylandClient, WaylandClientBuilder, FrameBuffer};
+use client::{WaylandClientBuilder, FrameBuffer};
 use pam::Client;
 use rand::Rng;
 use xkbcommon::xkb::Keysym;
@@ -25,7 +23,6 @@ fn keyboard(key: Keysym) {
     let name = &key.name().unwrap()[3..];
     println!("{}", name);
 }
-
 fn main() {
     let mut client = Client::with_password("system-auth")
     .expect("Failed to init PAM client");

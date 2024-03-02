@@ -3,7 +3,7 @@ mod drawing;
 
 pub use drawing::FrameBuffer;
 
-use std::{collections::VecDeque, os::raw::c_void, str::FromStr};
+use std::{collections::{HashMap, VecDeque}, hash::Hash, os::raw::c_void, str::FromStr, thread::sleep, time::{Duration, Instant}};
 
 use derive_builder::Builder;
 use pam::Client;
@@ -14,6 +14,17 @@ use xkbcommon::xkb::{ffi::XKB_CONTEXT_NO_FLAGS, Context, Keymap, Keysym, State};
 pub struct Rect {
     pub width: i32,
     pub height: i32
+}
+
+pub struct KeyRepeatInfo {
+    delay: i32,
+    rate: i32,
+}
+
+pub struct HeldKey {
+    keysym: Keysym,
+    instant: Instant,
+    repeat_count: i32,
 }
 
 struct AppState {
@@ -32,6 +43,8 @@ struct AppState {
     frame_buffers: VecDeque<FrameBuffer>,
     drawing_callback: fn(&FrameBuffer),
     keyboard_callback: fn(Keysym),
+    key_repeat_info: Option<KeyRepeatInfo>,
+    held_key: Option<HeldKey>,
     quit: bool
 }
 
@@ -40,6 +53,39 @@ struct AppState {
 pub struct WaylandClient {
     drawing_callback: fn(&FrameBuffer),
     keyboard_callback: fn(Keysym)
+}
+
+fn key_to_repeat<'a>(held_key: &'a Option<HeldKey>, key_repeat_info: &'a Option<KeyRepeatInfo>) -> Option<&'a HeldKey> {
+    match key_repeat_info {
+        Some(key_repeat_info) => {
+            let now = Instant::now();
+
+            if let Some(held_key) = held_key {
+                if 0 < now.duration_since(held_key.instant).as_millis() as i128 - (key_repeat_info.delay + key_repeat_info.rate * held_key.repeat_count) as i128 {
+                    return Some(held_key)
+                }
+            }
+            None
+        }
+        None => {
+            None
+        }
+    }
+}
+
+fn key_repeat_update<'a>(held_key: &mut Option<HeldKey>, key_repeat_info: &'a Option<KeyRepeatInfo>, keyboard_callback: &'a fn(Keysym)){
+    let repeat_key = key_to_repeat(held_key, key_repeat_info);
+
+    if let Some(repeat_key) = repeat_key {
+        (keyboard_callback)(repeat_key.keysym);
+        
+        match held_key {
+            Some(held_key) => {
+                held_key.repeat_count += 1;
+            }
+            None => {}
+        }
+    }
 }
 
 impl WaylandClient {
@@ -60,6 +106,8 @@ impl WaylandClient {
             frame_buffers: VecDeque::new(),
             drawing_callback: self.drawing_callback,
             keyboard_callback: self.keyboard_callback,
+            key_repeat_info: None,
+            held_key: None,
             quit: false,
         };
     
@@ -109,9 +157,10 @@ impl WaylandClient {
         let _ = wl_surface.frame(&qh, ());
     
         _xdg_toplevel.set_fullscreen(None);
-    
-        while !state.quit {
+        
+        while !&state.quit {
             let _ = event_queue.blocking_dispatch(&mut state);
+            key_repeat_update(&mut state.held_key, &state.key_repeat_info, &state.keyboard_callback);
         }
     }
 }

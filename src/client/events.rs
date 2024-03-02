@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, ffi::CStr, os::fd::AsRawFd, ptr};
+use std::{collections::VecDeque, ffi::CStr, os::fd::AsRawFd, ptr, time::Instant};
 
 use nix::libc::{close, mmap, munmap, MAP_PRIVATE, PROT_READ};
 use wayland_client::{protocol::{wl_buffer::{self, WlBuffer}, wl_callback::{self, WlCallback}, wl_compositor::{self, WlCompositor}, wl_keyboard::{self, WlKeyboard}, wl_registry::{self, WlRegistry}, wl_seat::{self, WlSeat}, wl_shm::{self, WlShm}, wl_shm_pool::{self, WlShmPool}, wl_surface::{self, WlSurface}}, Connection, Dispatch, QueueHandle, WEnum};
@@ -7,7 +7,7 @@ use xkbcommon::xkb::{ffi::{XKB_KEYMAP_COMPILE_NO_FLAGS, XKB_KEYMAP_FORMAT_TEXT_V
 
 use crate::{client::drawing::{attach_to_surface, generate_frame_buffer, FrameBuffer}};
 
-use super::{drawing::Release, AppState, Rect};
+use super::{drawing::Release, AppState, HeldKey, KeyRepeatInfo, Rect};
 
 impl Dispatch<WlCompositor, ()> for AppState {
     fn event(
@@ -210,12 +210,24 @@ impl Dispatch<WlKeyboard, ()> for AppState {
         else if let wl_keyboard::Event::Key { serial, time, key, state } = _event {
             match state {
                 WEnum::Value(state) => {
+
+                    let keysym = _state.xkb_state.as_ref()
+                        .expect("could not connect to xkb_state")
+                        .key_get_one_sym(Keycode::new((key + 8) as u32));
+
                     if let wl_keyboard::KeyState::Pressed = state {
-                        (_state.keyboard_callback)(
-                            _state.xkb_state.as_ref()
-                                .expect("could not connect to xkb_state")
-                                .key_get_one_sym(Keycode::new((key + 8) as u32))
-                        );
+                        (_state.keyboard_callback)(keysym);
+                        _state.held_key = Some(HeldKey { keysym, instant: Instant::now(), repeat_count: 0 });
+                    }
+                    else if let wl_keyboard::KeyState::Released = state {
+                        match &_state.held_key {
+                            Some(held_key) => {
+                                if held_key.keysym == keysym {
+                                    _state.held_key = None;
+                                }
+                            }
+                            None => {}
+                        }
                     }
                 },
                 WEnum::Unknown(_) => {}
@@ -223,6 +235,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             
         }
         else if let wl_keyboard::Event::Modifiers { serial, mods_depressed, mods_latched, mods_locked, group } = _event {
+            _state.held_key = None;
             match &_state.xkb_state {
                 Some(_) => {_state.xkb_state.as_mut().unwrap().update_mask(
                     mods_depressed,
@@ -237,7 +250,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
             
         }
         else if let wl_keyboard::Event::RepeatInfo { rate, delay } = _event {
-            /* TODO */
+            _state.key_repeat_info = Some(KeyRepeatInfo { rate, delay});
         }
         /* enumerate keys that were already pressed while entering */
         else if let wl_keyboard::Event::Enter { serial, surface, keys } = _event {
@@ -303,6 +316,5 @@ fn render_from_frame_queue(
             }
             None => attach_to_surface(None, wl_surface)
         }
-        
     }
 }
