@@ -95,23 +95,12 @@ impl Dispatch<XdgSurface, ()> for AppState {
         if let xdg_surface::Event::Configure { serial } = _event {
             _proxy.ack_configure(serial);
 
-            let wl_surface = _state.wl_surface.as_ref().expect("unable to connect to surface");
+            // let wl_surface = _state.wl_surface.as_ref().expect("unable to connect to surface");
 
             render_from_frame_queue(
-                &mut _state.frame_buffers,
-                _state.drawing_callback,
-                wl_surface,
-                &_state.dimension,
-                _state.shm.as_ref().expect("could not connect to shm"),
+                _state, 
                 _qhandle
             )
-
-            // let buffer = draw_frame(&_state, _qhandle)
-            //     .expect("unable to generate buffer");
-
-            // wl_surface.attach(Some(&buffer), 0, 0);
-            // wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-            // wl_surface.commit();
         }
     }
 }
@@ -158,11 +147,7 @@ impl Dispatch<WlCallback, ()> for AppState {
             let _ = wl_surface.frame(_qhandle, ());
 
             render_from_frame_queue(
-                &mut _state.frame_buffers,
-                _state.drawing_callback,
-                wl_surface,
-                &_state.dimension,
-                _state.shm.as_ref().expect("could not connect to shm"),
+                _state,
                 _qhandle
             )
         }   
@@ -216,7 +201,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
                         .key_get_one_sym(Keycode::new((key + 8) as u32));
 
                     if let wl_keyboard::KeyState::Pressed = state {
-                        (_state.keyboard_callback)(keysym);
+                        (_state.keyboard_callback)(_state, keysym);
                         _state.held_key = Some(HeldKey { keysym, instant: Instant::now(), repeat_count: 0 });
                     }
                     else if let wl_keyboard::KeyState::Released = state {
@@ -256,6 +241,7 @@ impl Dispatch<WlKeyboard, ()> for AppState {
         else if let wl_keyboard::Event::Enter { serial, surface, keys } = _event {
             keys.iter().for_each(|key| {
                 (_state.keyboard_callback)(
+                    _state, 
                     _state.xkb_state.as_ref()
                         .expect("could not connect to xkb_state")
                         .key_get_one_sym(Keycode::new((key + 8) as u32))
@@ -293,28 +279,29 @@ impl Dispatch<WlRegistry, ()> for AppState {
 }
 
 fn render_from_frame_queue(
-    frame_buffers: &mut VecDeque<FrameBuffer>,
-    drawing_callback: fn(&FrameBuffer), 
-    wl_surface: &WlSurface, 
-    dimension: &Option<Rect>,
-    wl_shm: &WlShm,
+    state: &mut AppState,
     qh: &QueueHandle<AppState>
 ) {
-    if frame_buffers.len() == 2 {
-        drawing_callback(&frame_buffers[0]);
-        attach_to_surface(Some(&frame_buffers[0]), wl_surface);
-        frame_buffers.swap(0, 1);
+    let drawing_callback = state.drawing_callback;
+    let surface = state.wl_surface.as_ref().expect("could not connect to surface");
+    let dimension = &state.dimension;
+    let shm = state.shm.as_ref().expect("could not connect to wl_shm");
+
+    if state.frame_buffers.len() == 2 {
+        drawing_callback(&state, &state.frame_buffers[0]);
+        attach_to_surface(Some(&state.frame_buffers[0]), surface);
+        state.frame_buffers.swap(0, 1);
     }
     else {
-        match &dimension {
+        match dimension {
             Some(dimension) => {
-                let frame_buffer = generate_frame_buffer(&dimension, wl_shm, qh)
+                let frame_buffer = generate_frame_buffer(&dimension, &shm, qh)
                     .expect("could not generate frame_buffer!");
-                drawing_callback(&frame_buffer);
-                attach_to_surface(Some(&frame_buffer), wl_surface);
-                frame_buffers.push_back(frame_buffer);
+                drawing_callback(state, &frame_buffer);
+                attach_to_surface(Some(&frame_buffer), surface);
+                state.frame_buffers.push_back(frame_buffer);
             }
-            None => attach_to_surface(None, wl_surface)
+            None => attach_to_surface(None, surface)
         }
     }
 }

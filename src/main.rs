@@ -1,13 +1,18 @@
 // https://wayland-book.com/
 
-use client::{WaylandClientBuilder, FrameBuffer};
-use pam::Client;
+use std::{io::{stdout, Write}, sync::Mutex, thread};
+
+use client::{AppState, FrameBuffer, WaylandClient, WaylandClientBuilder};
+use pam_client::{conv_mock::Conversation, Context, Flag};
 use rand::Rng;
-use xkbcommon::xkb::Keysym;
+use users::get_current_username;
+use xkbcommon::xkb::{self, Keysym};
 
 mod client;
 
-fn draw(frame_buffer: &FrameBuffer) {
+static OUTPUT: Mutex<String> = Mutex::new(String::new());
+
+fn draw(_state: &AppState, frame_buffer: &FrameBuffer) {
     let color:u32 = rand::thread_rng().gen_range(0x00000000..=0x50);
 
     for y in 0..frame_buffer.dimension.height {
@@ -19,26 +24,49 @@ fn draw(frame_buffer: &FrameBuffer) {
     }
 }
 
-fn keyboard(key: Keysym) {
-    let name = &key.name().unwrap()[3..];
-    println!("{}", name);
+fn authenticate(state: &mut AppState, password: &str) {
+    let user = get_current_username()
+    .expect("could not get current user!");
+    let user = user.to_str().unwrap();
+
+    let mut context = Context::new(
+        "bbsl",  // Service name
+        None,
+        Conversation::with_credentials(user, password)
+     ).expect("Failed to initialize PAM context");
+     
+    // Authenticate the user
+    match context.authenticate(Flag::NONE) {
+        Ok(_) => {
+            state.quit = true;
+        },
+        Err(err) => {
+            println!("HERE: {:?} {:?}", context.conversation().log, err);
+        }
+    }
 }
+
+fn keyboard(state: &mut AppState, key: Keysym) {
+    let key_name = xkb::keysym_to_utf8(key);
+    let key_name = key_name.trim_matches(char::from(0));
+    let mut output = OUTPUT.lock().unwrap();
+
+    if key.name().unwrap() == "XK_BackSpace" {
+        output.pop();
+    }
+    else if key.name().unwrap() == "XK_Return" {
+        authenticate(state, output.as_str());
+    }
+    else {
+        output.push_str(key_name);
+    }
+}
+
 fn main() {
-    let mut client = Client::with_password("system-auth")
-    .expect("Failed to init PAM client");
-
-
-    WaylandClientBuilder::default()
+    let mut client = WaylandClientBuilder::default()
         .drawing_callback(draw)
         .keyboard_callback(keyboard)
         .build()
-        .expect("unable to build client")
-        .start();
-
-    // Preset the login & password we will use for authentication
-    client.conversation_mut().set_credentials("", "");
-    // Actually try to authenticate:
-    client.authenticate().expect("Authentication failed!");
-    // Now that we are authenticated, it's possible to open a sesssion:
-    client.open_session().expect("Failed to open a session!");
+        .expect("unable to build client");
+    client.start();
 }

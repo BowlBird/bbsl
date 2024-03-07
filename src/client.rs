@@ -6,28 +6,31 @@ pub use drawing::FrameBuffer;
 use std::{collections::{HashMap, VecDeque}, hash::Hash, os::raw::c_void, str::FromStr, thread::sleep, time::{Duration, Instant}};
 
 use derive_builder::Builder;
-use pam::Client;
 use wayland_client::{protocol::{wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat, wl_shm::WlShm, wl_surface::WlSurface}, Connection, EventQueue};
 use wayland_protocols::xdg::shell::client::{xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase};
 use xkbcommon::xkb::{ffi::XKB_CONTEXT_NO_FLAGS, Context, Keymap, Keysym, State};
 
+#[derive(Clone)]
 pub struct Rect {
     pub width: i32,
     pub height: i32
 }
 
+#[derive(Clone)]
 pub struct KeyRepeatInfo {
     delay: i32,
     rate: i32,
 }
 
+#[derive(Clone)]
 pub struct HeldKey {
     keysym: Keysym,
     instant: Instant,
     repeat_count: i32,
 }
 
-struct AppState {
+#[derive(Clone)]
+pub struct AppState {
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     base: Option<XdgWmBase>,
@@ -41,18 +44,20 @@ struct AppState {
     xkb_state: Option<State>,
     dimension: Option<Rect>,
     frame_buffers: VecDeque<FrameBuffer>,
-    drawing_callback: fn(&FrameBuffer),
-    keyboard_callback: fn(Keysym),
+    drawing_callback: fn(&AppState, &FrameBuffer),
+    keyboard_callback: fn(&mut AppState, Keysym),
     key_repeat_info: Option<KeyRepeatInfo>,
     held_key: Option<HeldKey>,
-    quit: bool
+    pub quit: bool
 }
 
 #[derive(Builder)]
 #[builder(pattern = "immutable")]
 pub struct WaylandClient {
-    drawing_callback: fn(&FrameBuffer),
-    keyboard_callback: fn(Keysym)
+    drawing_callback: fn(&AppState, &FrameBuffer),
+    keyboard_callback: fn(&mut AppState, Keysym),
+    #[builder(setter(skip))]
+    state: Option<AppState>,
 }
 
 fn key_to_repeat<'a>(held_key: &'a Option<HeldKey>, key_repeat_info: &'a Option<KeyRepeatInfo>) -> Option<&'a HeldKey> {
@@ -73,13 +78,13 @@ fn key_to_repeat<'a>(held_key: &'a Option<HeldKey>, key_repeat_info: &'a Option<
     }
 }
 
-fn key_repeat_update<'a>(held_key: &mut Option<HeldKey>, key_repeat_info: &'a Option<KeyRepeatInfo>, keyboard_callback: &'a fn(Keysym)){
-    let repeat_key = key_to_repeat(held_key, key_repeat_info);
+fn key_repeat_update<'a>(state: &mut AppState){
+    let repeat_key = key_to_repeat(&state.held_key, &state.key_repeat_info);
 
     if let Some(repeat_key) = repeat_key {
-        (keyboard_callback)(repeat_key.keysym);
+        (state.keyboard_callback)(state, repeat_key.keysym);
         
-        match held_key {
+        match &mut state.held_key {
             Some(held_key) => {
                 held_key.repeat_count += 1;
             }
@@ -89,8 +94,9 @@ fn key_repeat_update<'a>(held_key: &mut Option<HeldKey>, key_repeat_info: &'a Op
 }
 
 impl WaylandClient {
-    pub fn start(&self) {
-        let mut state = AppState {
+    pub fn start(&mut self) {
+
+        self.state = Some(AppState {
             compositor: None,
             shm: None,
             base: None,
@@ -109,14 +115,14 @@ impl WaylandClient {
             key_repeat_info: None,
             held_key: None,
             quit: false,
-        };
+        });
+        let mut state = self.state.as_mut().unwrap();
     
         let connection = Connection::connect_to_env()
             .expect("could not connect to env");
         state.xkb_context = Some(Context::new(XKB_CONTEXT_NO_FLAGS));
     
         let display = connection.display();
-    
         let mut event_queue: EventQueue<AppState> = connection.new_event_queue();
         let qh = event_queue.handle();
         display.get_registry(&qh, ());
@@ -160,7 +166,7 @@ impl WaylandClient {
         
         while !&state.quit {
             let _ = event_queue.blocking_dispatch(&mut state);
-            key_repeat_update(&mut state.held_key, &state.key_repeat_info, &state.keyboard_callback);
+            key_repeat_update(state);
         }
     }
 }

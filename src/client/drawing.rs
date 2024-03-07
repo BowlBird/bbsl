@@ -12,6 +12,7 @@ use super::{AppState, Rect};
  * Example:
  * *(pool_data.offset(((y * width + x) * 4) as isize) as *mut u32) = color
  */
+#[derive(Clone)]
 pub struct FrameBuffer {
     wl_buffer: WlBuffer,
     pub pool_data: *mut c_void,
